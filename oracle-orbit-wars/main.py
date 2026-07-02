@@ -47,7 +47,7 @@ DEFAULT_PARAMS = {
     "defense_wait_slack": 2,
     "expand_avail_min": 8,
     "max_moves": 8,
-    "use_mcts": False,
+    "use_mcts": True,
 }
 
 
