@@ -40,6 +40,22 @@ ROTATION_RADIUS_LIMIT = 50.0
 EPISODE_STEPS = 500
 MAX_SPEED = 6.0
 
+DEFAULT_PARAMS = {
+    "counter_threshold": None,
+    "defense_horizon": 10,
+    "defense_margin": 5,
+    "defense_wait_slack": 2,
+    "expand_avail_min": 8,
+    "max_moves": 8,
+    "use_mcts": False,
+}
+
+
+def cfg(config, key):
+    if isinstance(config, dict) and key in config:
+        return config[key]
+    return DEFAULT_PARAMS[key]
+
 
 def fleet_speed(ships):
     if ships <= 1:
@@ -124,9 +140,8 @@ def intercept(launch_x, launch_y, target, gs_step, angular_velocity, initial_by_
     return None
 
 
-def predicted_threat(planets, fleets, planet, player_id, horizon=10):
-    threat = 0
-    min_eta = float('inf')
+def incoming_threats(fleets, planet, player_id, horizon=10):
+    threats = []
     for f in fleets:
         if f[1] in (player_id, -1):
             continue
@@ -134,8 +149,7 @@ def predicted_threat(planets, fleets, planet, player_id, horizon=10):
         dy = planet[3] - f[3]
         d = math.hypot(dx, dy)
         if d < 1e-6:
-            threat += f[6]
-            min_eta = 0
+            threats.append((0.0, f[6], f))
             continue
         s = fleet_speed(f[6])
         eta = d / max(s, 0.1)
@@ -145,9 +159,15 @@ def predicted_threat(planets, fleets, planet, player_id, horizon=10):
         vy = math.sin(f[4]) * s
         proj = (vx * dx + vy * dy) / d
         if proj > s * 0.3:
-            threat += f[6]
-            if eta < min_eta:
-                min_eta = eta
+            threats.append((eta, f[6], f))
+    threats.sort(key=lambda x: x[0])
+    return threats
+
+
+def predicted_threat(planets, fleets, planet, player_id, horizon=10):
+    threats = incoming_threats(fleets, planet, player_id, horizon)
+    threat = sum(t[1] for t in threats)
+    min_eta = threats[0][0] if threats else float("inf")
     return int(threat), min_eta
 
 
@@ -550,7 +570,14 @@ def get_opening_move(initial_planets, angular_velocity, player_id, step, planets
 # ============================================================================
 
 _prev_enemy_fleets = {}
-_enemy_avg_launch = 20.0
+_enemy_avg_launch = {}
+
+
+def reset_state():
+    """Reset cross-turn memory before a new local evaluation game."""
+    global _prev_enemy_fleets, _enemy_avg_launch
+    _prev_enemy_fleets = {}
+    _enemy_avg_launch = {}
 
 
 def heuristic_agent(obs, config=None, mode="all", simulate=False):
@@ -573,20 +600,24 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
 
     moves = []
     committed = defaultdict(int)
+    prev_enemy_fleets = _prev_enemy_fleets.setdefault(player_id, {})
+    enemy_avg_launch = _enemy_avg_launch.get(player_id, 20.0)
 
     # --- PHASE 1: COUNTER-PUNCH ---
     new_enemy_fleets = []
     for f in fleets:
         if f[1] in (player_id, -1):
             continue
-        if f[0] not in _prev_enemy_fleets:
+        if f[0] not in prev_enemy_fleets:
             new_enemy_fleets.append(f)
             if not simulate:
-                _enemy_avg_launch = 0.7 * _enemy_avg_launch + 0.3 * f[6]
+                enemy_avg_launch = 0.7 * enemy_avg_launch + 0.3 * f[6]
+    if not simulate:
+        _enemy_avg_launch[player_id] = enemy_avg_launch
 
-    counter_threshold = max(10, min(30, int(_enemy_avg_launch * 0.8)))
-    if config and "counter_threshold" in config:
-        counter_threshold = config["counter_threshold"]
+    counter_threshold = cfg(config, "counter_threshold")
+    if counter_threshold is None:
+        counter_threshold = max(10, min(30, int(enemy_avg_launch * 0.8)))
 
     for ef in new_enemy_fleets:
         if ef[6] < counter_threshold:
@@ -613,42 +644,56 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
             committed[best_mp[0]] += int(best_send)
 
     if not simulate:
-        _prev_enemy_fleets = {f[0]: True for f in fleets if f[1] not in (player_id, -1)}
+        _prev_enemy_fleets[player_id] = {
+            f[0]: True for f in fleets if f[1] not in (player_id, -1)
+        }
     launched_from = set(m[0] for m in moves)
 
-    # --- PHASE 2: DEFEND (Precision Just-in-Time) ---
-    horizon = config.get("horizon", 8) if config else 8
+    # --- PHASE 2: DEFEND (ETA-aware, but never forget urgent threats) ---
+    horizon = cfg(config, "defense_horizon")
+    defense_margin = cfg(config, "defense_margin")
+    wait_slack = cfg(config, "defense_wait_slack")
     for mp in my_planets:
         threat, min_eta = predicted_threat(planets, fleets, mp, player_id, horizon=horizon)
         if threat <= 0:
             continue
-        deficit = threat - (mp[5] + int(mp[6] * min_eta))
+        local_ships = mp[5] - committed[mp[0]]
+        produced_before_hit = int(mp[6] * max(0, math.floor(min_eta)))
+        deficit = threat - (local_ships + produced_before_hit)
         if deficit <= 0:
             continue
         best_donor = None
         best_dist = float("inf")
         best_angle = 0
+        best_arrival = 999
+        earliest = None
         for donor in my_planets:
             if donor[0] == mp[0]:
                 continue
-            surplus = donor[5] - max(3, donor[6] * 2)
-            if surplus < deficit + 5:
+            surplus = donor[5] - committed[donor[0]] - max(3, donor[6] * 2)
+            send_need = deficit + defense_margin
+            if surplus < send_need:
                 continue
-            result = intercept(donor[2], donor[3], mp, step, angular_velocity, initial_by_id, deficit + 5)
+            result = intercept(donor[2], donor[3], mp, step, angular_velocity, initial_by_id, send_need)
             if not result:
                 continue
             arrival, angle, d = result
+            if earliest is None or arrival < earliest[0]:
+                earliest = (arrival, d, donor, angle)
             if arrival <= min_eta + 1:
-                # If we have more than 2 turns of slack, wait to build more ships at donor
-                if min_eta - arrival > 2:
+                if min_eta - arrival > wait_slack:
                     continue
                 if d < best_dist:
                     best_dist = d
                     best_donor = donor
                     best_angle = angle
+                    best_arrival = arrival
+        if best_donor is None and earliest is not None and earliest[0] <= min_eta + 3:
+            best_arrival, best_dist, best_donor, best_angle = earliest
         if best_donor is None:
             continue
-        send = min(deficit + 5, best_donor[5] - max(3, best_donor[6] * 2))
+        send = min(deficit + defense_margin,
+                   best_donor[5] - committed[best_donor[0]] - max(3, best_donor[6] * 2))
         if send < 5:
             continue
         moves.append([best_donor[0], best_angle, int(send)])
@@ -737,7 +782,6 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
         group_items = list(target_groups.values())
         group_items.sort(key=lambda g: max(x[0] for x in g), reverse=True)
         
-        used_targets = set()
         for group in group_items:
             t = group[0][2]
             if t[0] in used_targets:
@@ -747,9 +791,9 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
             group.sort(key=lambda x: x[5], reverse=True)
             
             accumulated_ships = 0
-            needed = t[5] + 3
             selected_attackers = []
             max_arrival = 0
+            needed = t[5] + 3
             
             for v, mp, _, send, angle, arrival in group:
                 if mp[0] in launched_from:
@@ -764,18 +808,53 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 accumulated_ships += send
                 if max_arrival == 0:
                     max_arrival = arrival
+                    target_growth = t[6] * max_arrival if t[1] not in (-1, player_id) else 0
+                    needed = t[5] + target_growth + 3
                 if accumulated_ships >= needed:
                     break
                     
             if accumulated_ships >= needed and len(selected_attackers) > 0:
-                for mp, send, angle, arrival in selected_attackers:
-                    # Synchronize: only launch if they need to leave NOW to arrive with the farthest fleet
-                    if max_arrival - arrival <= 1:
+                due_attackers = [
+                    item for item in selected_attackers
+                    if max_arrival - item[3] <= 1
+                ]
+                due_ships = sum(item[1] for item in due_attackers)
+                spread = max_arrival - min(item[3] for item in selected_attackers)
+                if due_ships >= needed:
+                    launch_attackers = due_attackers
+                elif spread <= 3:
+                    launch_attackers = selected_attackers
+                else:
+                    launch_attackers = []
+
+                launched_ships = sum(item[1] for item in launch_attackers)
+                if launched_ships >= needed:
+                    for mp, send, angle, arrival in launch_attackers:
                         moves.append([mp[0], angle, int(send)])
                         committed[mp[0]] += int(send)
                         launched_from.add(mp[0])
-                used_targets.add(t[0])
+                    used_targets.add(t[0])
                 if len(moves) >= 8:
+                    break
+
+        if len(moves) < 6:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for v, mp, t, send, angle, arrival in candidates:
+                if mp[0] in launched_from or t[0] in used_targets:
+                    continue
+                reserve = 2 if step < 30 else max(3, mp[6] * 2)
+                avail = mp[5] - committed[mp[0]] - reserve
+                need = t[5] + 3
+                if avail < need:
+                    continue
+                send = min(avail, send)
+                if send < need or send < 5:
+                    continue
+                moves.append([mp[0], angle, int(send)])
+                committed[mp[0]] += int(send)
+                launched_from.add(mp[0])
+                used_targets.add(t[0])
+                if len(moves) >= cfg(config, "max_moves"):
                     break
 
     # --- PHASE 4: EXPAND (with race denial) ---
@@ -786,7 +865,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 continue
             reserve = 2 if step < 30 else max(3, mp[6] * 2)
             avail = mp[5] - committed[mp[0]] - reserve
-            expand_avail_min = config.get("expand_avail_min", 8) if config else 8
+            expand_avail_min = cfg(config, "expand_avail_min")
             if avail < expand_avail_min:
                 continue
             for t in planets:
@@ -835,6 +914,42 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
             launched_from.add(mp[0])
             used_targets.add(t[0])
             if len(moves) >= 8:
+                break
+
+    # --- PHASE 5: ENDGAME SWEEP ---
+    # Late in the game, banked ships lose value. Convert surplus into captures
+    # and pressure while still leaving a small reserve on production planets.
+    if mode in ("all", "attack") and step >= 440 and len(moves) < cfg(config, "max_moves"):
+        enemies = [p for p in planets if p[1] not in (-1, player_id)]
+        enemies.sort(key=lambda p: (p[5], -p[6]))
+        for mp in sorted(my_planets, key=lambda p: p[5], reverse=True):
+            if mp[0] in launched_from or not enemies:
+                continue
+            reserve = max(2, mp[6])
+            avail = mp[5] - committed[mp[0]] - reserve
+            if avail < 6:
+                continue
+            best = None
+            for t in enemies[:5]:
+                result = intercept(mp[2], mp[3], t, step, angular_velocity, initial_by_id, avail)
+                if result is None:
+                    continue
+                arrival, angle, _ = result
+                if step + arrival > EPISODE_STEPS - 1:
+                    continue
+                need = t[5] + t[6] * arrival + 2
+                if avail < need:
+                    continue
+                score = (t[6] + 1) * 100 - t[5] - arrival
+                if best is None or score > best[0]:
+                    best = (score, t, angle, min(avail, need + 4))
+            if best is None:
+                continue
+            _, t, angle, send = best
+            moves.append([mp[0], angle, int(send)])
+            committed[mp[0]] += int(send)
+            launched_from.add(mp[0])
+            if len(moves) >= cfg(config, "max_moves"):
                 break
 
     # --- SANITIZE ---
@@ -894,10 +1009,11 @@ def agent(obs, config=None):
         if opening:
             return opening
 
-    # Phase 2: MCTS Action Abstraction
-    if 30 <= step <= 450:
+    # Phase 2: Optional experimental search. Disabled by default because the
+    # heuristic is faster and more reliable under Kaggle turn budgets.
+    if cfg(config, "use_mcts") and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
-        return mcts_search(planets, fleets, player_id, opp_id, step, angular_velocity, initial_by_id, time_budget=0.85)
+        return mcts_search(planets, fleets, player_id, opp_id, step, angular_velocity, initial_by_id, time_budget=0.15)
 
     # Phase 3: Pure heuristic
     return heuristic_agent(obs, config)

@@ -3,3 +3,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.DS_Store
+Thumbs.db
+.env
+*.log
+.pytest_cache/
+kaggle-hack-info.txt
+oracle-orbit-wars/venv/
+oracle-orbit-wars/oracle-orbit-wars/
