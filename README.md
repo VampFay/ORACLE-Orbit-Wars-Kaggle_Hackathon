@@ -13,6 +13,7 @@ Key behavior:
 - Race-denial expansion for contested neutral planets.
 - Safer grouped attacks with greedy fallback when synchronized launches are not useful.
 - Endgame sweep logic to convert banked ships into captures before the episode ends.
+- Per-turn intercept caching to reduce repeated orbital geometry work.
 - Optional MCTS code is retained for experiments, but `use_mcts` defaults to `False`.
 
 ## Fixed-Seed Results

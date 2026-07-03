@@ -29,6 +29,10 @@ Goal: push ORACLE toward leaderboard strength while keeping the submitted agent 
 - Replaced the tuning scaffold with deterministic random search over exposed heuristic parameters.
 - Added `reset_state()` so repeated local games do not leak cross-game memory.
 
+### 6. Runtime Safety
+- MCTS is gated behind an explicit `config["use_mcts"] is True` check.
+- Added a per-turn intercept cache so repeated source-target checks reuse orbital projection and sun-path results.
+
 ## Current Fixed-Seed Result
 
 Command:

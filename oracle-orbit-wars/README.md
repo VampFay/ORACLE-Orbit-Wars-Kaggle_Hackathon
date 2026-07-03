@@ -10,6 +10,7 @@ ORACLE is a self-contained Kaggle Orbit Wars bot. The default submitted policy i
 - **Grouped attacks:** tries multi-source target grouping, but only commits when the ships launched now are sufficient.
 - **Greedy fallback:** preserves easy tactical captures when synchronization is not available.
 - **Endgame sweep:** spends late surplus ships on captures that can land before the final turn.
+- **Per-turn intercept cache:** reuses repeated orbit/intercept calculations inside each decision.
 
 ## Architecture
 

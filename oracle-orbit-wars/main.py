@@ -1,22 +1,14 @@
 """
-ORACLE — Final Submission for Kaggle Orbit Wars
-================================================
+ORACLE — Kaggle Orbit Wars agent
+================================
 
-Best version: MCTS with correct swept-pair physics + counter-punch +
-race denial + opening book + heuristic fallback.
+Default submission path: fast heuristic policy with ETA-aware defense,
+counter-punching, race denial, grouped attacks, greedy tactical fallback,
+and endgame sweeps.
 
-Results (vs adaptive hybrid "live" top-bot opponents):
-  - 70% win rate (10 games, 2P)
-  - Est. ELO ~1550 (top-10 cutoff: 1509)
-
-Architecture:
-  1. Opening Book (turns 0-30): copy winner's exact moves from replay DB
-  2. MCTS 1-ply (turns 30-470): try actions, predict opp response, evaluate
-     - Uses CORRECT swept_pair_hit collision detection from env source
-  3. Heuristic fallback (turns 470+ or if MCTS fails):
-     - Counter-punch: exploit weak source after big enemy launch
-     - Race denial: capture neutrals closer to enemy before they can
-     - Defense + expansion + attack
+Experimental MCTS/search code is retained for local testing, but disabled
+by default because fixed-seed checks showed no clear win-rate gain for the
+extra runtime cost.
 
 Author: ORACLE Team
 """
@@ -47,7 +39,7 @@ DEFAULT_PARAMS = {
     "defense_wait_slack": 2,
     "expand_avail_min": 8,
     "max_moves": 8,
-    "use_mcts": True,
+    "use_mcts": False,
 }
 
 
@@ -138,6 +130,54 @@ def intercept(launch_x, launch_y, target, gs_step, angular_velocity, initial_by_
                 arrival = max(1, math.ceil(d / s))
                 return (arrival, angle, d)
     return None
+
+
+def make_intercept_cache(gs_step, angular_velocity, initial_by_id):
+    """Return a per-turn cached intercept function for repeated source-target checks."""
+    pos_cache = {}
+    sun_cache = {}
+    intercept_cache = {}
+
+    def future_position(target, future_step):
+        key = (target[0], future_step)
+        if key not in pos_cache:
+            pos_cache[key] = planet_position_at(target, future_step, angular_velocity, initial_by_id)
+        return pos_cache[key]
+
+    def cached_path_crosses_sun(x1, y1, x2, y2):
+        key = (round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3))
+        if key not in sun_cache:
+            sun_cache[key] = path_crosses_sun(x1, y1, x2, y2)
+        return sun_cache[key]
+
+    def cached_intercept(launch_x, launch_y, target, ships):
+        key = (
+            round(launch_x, 3),
+            round(launch_y, 3),
+            target[0],
+            int(ships),
+            gs_step,
+        )
+        if key in intercept_cache:
+            return intercept_cache[key]
+
+        speed = fleet_speed(ships)
+        for t in range(1, 100):
+            future_step = gs_step + t
+            tx, ty = future_position(target, future_step)
+            d = math.hypot(tx - launch_x, ty - launch_y)
+            if d <= speed * t + 1e-6:
+                if not cached_path_crosses_sun(launch_x, launch_y, tx, ty):
+                    angle = math.atan2(ty - launch_y, tx - launch_x)
+                    arrival = max(1, math.ceil(d / speed))
+                    result = (arrival, angle, d)
+                    intercept_cache[key] = result
+                    return result
+
+        intercept_cache[key] = None
+        return None
+
+    return cached_intercept
 
 
 def incoming_threats(fleets, planet, player_id, horizon=10):
@@ -593,6 +633,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
     angular_velocity = obs.get("angular_velocity", 0.0) or 0.0
     initial_planets = obs.get("initial_planets", []) or []
     initial_by_id = {p[0]: p for p in initial_planets}
+    cached_intercept = make_intercept_cache(step, angular_velocity, initial_by_id)
 
     my_planets = [p for p in planets if p[1] == player_id]
     if not my_planets:
@@ -633,7 +674,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 continue
             if path_crosses_sun(mp[2], mp[3], source[2], source[3]):
                 continue
-            result = intercept(mp[2], mp[3], source, step, angular_velocity, initial_by_id, avail)
+            result = cached_intercept(mp[2], mp[3], source, avail)
             if result and result[0] < best_arrival:
                 best_arrival = result[0]
                 best_mp = mp
@@ -674,7 +715,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
             send_need = deficit + defense_margin
             if surplus < send_need:
                 continue
-            result = intercept(donor[2], donor[3], mp, step, angular_velocity, initial_by_id, send_need)
+            result = cached_intercept(donor[2], donor[3], mp, send_need)
             if not result:
                 continue
             arrival, angle, d = result
@@ -721,7 +762,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                     continue
                 if path_crosses_sun(mp[2], mp[3], t[2], t[3]):
                     continue
-                result = intercept(mp[2], mp[3], t, step, angular_velocity, initial_by_id, avail)
+                result = cached_intercept(mp[2], mp[3], t, avail)
                 if result is None or result[0] > 25:
                     continue
                 arrival, angle, _ = result
@@ -760,7 +801,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                     continue
                 if path_crosses_sun(mp[2], mp[3], t[2], t[3]):
                     continue
-                result = intercept(mp[2], mp[3], t, step, angular_velocity, initial_by_id, avail)
+                result = cached_intercept(mp[2], mp[3], t, avail)
                 if result is None or result[0] > 60:
                     continue
                 arrival, angle, _ = result
@@ -873,7 +914,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                     continue
                 if path_crosses_sun(mp[2], mp[3], t[2], t[3]):
                     continue
-                result = intercept(mp[2], mp[3], t, step, angular_velocity, initial_by_id, avail)
+                result = cached_intercept(mp[2], mp[3], t, avail)
                 if result is None or result[0] > 40:
                     continue
                 arrival, angle, _ = result
@@ -931,7 +972,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 continue
             best = None
             for t in enemies[:5]:
-                result = intercept(mp[2], mp[3], t, step, angular_velocity, initial_by_id, avail)
+                result = cached_intercept(mp[2], mp[3], t, avail)
                 if result is None:
                     continue
                 arrival, angle, _ = result
@@ -1011,7 +1052,7 @@ def agent(obs, config=None):
 
     # Phase 2: Optional experimental search. Disabled by default because the
     # heuristic is faster and more reliable under Kaggle turn budgets.
-    if cfg(config, "use_mcts") and 30 <= step <= 450:
+    if cfg(config, "use_mcts") is True and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
         return mcts_search(planets, fleets, player_id, opp_id, step, angular_velocity, initial_by_id, time_budget=0.15)
 
