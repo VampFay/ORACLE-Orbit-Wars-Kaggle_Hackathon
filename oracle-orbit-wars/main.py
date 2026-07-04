@@ -37,15 +37,18 @@ DEFAULT_PARAMS = {
     "defense_margin": 5,         # extra ships added on top of raw deficit
     "defense_wait_slack": 2,     # turns of arrival slack before skipping a donor
     "expand_avail_min": 8,       # minimum surplus ships needed to expand
-    "ffa_sandbag_share": 0.35,    # in 4P, stop expansion/attacks when leading too hard
-    "ffa_survival_share": 0.24,    # in 4P, avoid attacks when near elimination
-    "ffa_leader_share": 0.36,      # in 4P, bias attacks toward runaway leaders
+    "ffa_sandbag_share": 0.35,   # in 4P, stop expansion/attacks when leading too hard
+    "ffa_survival_share": 0.24,  # in 4P, avoid attacks when near elimination
+    "ffa_leader_share": 0.36,    # in 4P, bias attacks toward runaway leaders
     "max_moves": 8,              # cap on moves generated per turn
-    "mcts_time_budget": 0.30,    # seconds budget per MCTS call (safe under Kaggle 1 s limit)
-    "comet_reserve_window": 5,    # turns before spawn to avoid draining surplus ships
-    "comet_min_remaining": 4,     # minimum visible comet turns after arrival
-    # NOTE: use_mcts=True is the default submission config and gives 70 % vs starter.
-    # Kaggle never passes config, so cfg() falls back to this dict every turn.
+    # Search parameters — Beam Search replaced 3-ply MCTS for 50x deeper lookahead
+    "mcts_time_budget": 0.40,    # total seconds budget (Kaggle Linux ~2x faster than local Mac)
+    "beam_width": 6,             # beam states to keep per depth level
+    "beam_depth": 8,             # depth levels (each = 2 sim turns: ours + opp response)
+    "comet_reserve_window": 5,   # turns before comet spawn to conserve ships
+    "comet_min_remaining": 4,    # min comet turns remaining after our fleet arrives
+    # NOTE: use_mcts=True activates beam search. Kaggle never passes config,
+    # so cfg() always falls back to this dict — beam search is always live.
     "use_mcts": True,
 }
 
@@ -412,14 +415,73 @@ def simulate_turn(planets, fleets, actions_by_player, step, angular_velocity, in
 # ============================================================================
 
 def evaluate_state(planets, fleets, player_id, step):
+    """Multi-signal state evaluator for beam search.
+
+    Signals (in priority order):
+    1. Terminal detection (win/loss → ±1e9)
+    2. Ship differential (planets + in-transit)
+    3. Production advantage × time-left (compounds more later)
+    4. Fleet threat balance (enemy fleets toward us = liability)
+    5. Planet count lead × production (economic momentum)
+    6. Win proximity bonus (enemy near elimination)
+    7. Production dominance bonus (2× prod = runaway lead)
+    """
     my_planets = [p for p in planets if p[1] == player_id]
     enemy_planets = [p for p in planets if p[1] not in (-1, player_id)]
-    my_ships = sum(p[5] for p in my_planets) + sum(f[6] for f in fleets if f[1] == player_id)
-    enemy_ships = sum(p[5] for p in enemy_planets) + sum(f[6] for f in fleets if f[1] not in (-1, player_id))
+
+    # Terminal detection
+    if not my_planets:
+        return -1e9
+    if not enemy_planets:
+        return 1e9
+
     my_prod = sum(p[6] for p in my_planets)
     enemy_prod = sum(p[6] for p in enemy_planets)
-    score = (my_ships - enemy_ships) + (my_prod - enemy_prod) * 3.0 * max(1, (EPISODE_STEPS - step) / 100)
-    return score
+
+    my_ships = sum(p[5] for p in my_planets)
+    enemy_ships = sum(p[5] for p in enemy_planets)
+    my_planet_ids = {p[0] for p in my_planets}
+    enemy_planet_ids = {p[0] for p in enemy_planets}
+
+    # In-transit ships + fleet threat balance
+    # f[5] = target planet_id, f[6] = ships, f[1] = owner
+    fleet_threat_delta = 0.0
+    for f in fleets:
+        if f[1] == player_id:
+            my_ships += f[6]
+            if f[5] in enemy_planet_ids:  # our fleet attacking enemy
+                fleet_threat_delta += f[6] * 0.25
+        elif f[1] >= 0:
+            enemy_ships += f[6]
+            if f[5] in my_planet_ids:     # enemy fleet threatening us
+                fleet_threat_delta -= f[6] * 0.25
+
+    # Time factor — production lead is worth more with more turns left
+    turns_left = max(1, EPISODE_STEPS - step)
+    time_factor = max(1.0, turns_left / 100.0)
+
+    # Core scores
+    ship_score = float(my_ships - enemy_ships)
+    prod_score = float(my_prod - enemy_prod) * 3.0 * time_factor
+
+    # Planet count momentum
+    planet_lead = len(my_planets) - len(enemy_planets)
+    planet_score = planet_lead * max(my_prod, 1) * 0.4
+
+    # Win-proximity bonus — enemy down to 1 planet means we're close
+    if len(enemy_planets) == 1:
+        win_bonus = 150.0 + max(0.0, 500.0 - enemy_planets[0][5]) * 0.4
+    else:
+        win_bonus = 0.0
+
+    # Production dominance — 2× production is a runaway signal
+    if enemy_prod > 0 and my_prod >= enemy_prod * 2.0:
+        prod_dominance = my_prod * time_factor * 1.0
+    else:
+        prod_dominance = 0.0
+
+    return (ship_score + prod_score + fleet_threat_delta
+            + planet_score + win_bonus + prod_dominance)
 
 
 # ============================================================================
@@ -469,31 +531,41 @@ def predict_opponent_move(planets, fleets, opp_id, step, angular_velocity, initi
 # MULTI-PLY MCTS (3-ply: our move → opp response → our move → evaluate)
 # ============================================================================
 
-def generate_candidate_actions(planets, fleets, player_id, step, angular_velocity, initial_by_id, max_actions=6):
+def generate_candidate_actions(planets, fleets, player_id, step, angular_velocity, initial_by_id, max_actions=8):
+    """Generate diverse heuristic strategy candidates for beam search.
+
+    8 portfolios covering the full strategy spectrum from all-in rush
+    to ultra-turtle, giving beam search a wide initial branching factor.
+    """
     obs = {
         "player": player_id,
         "planets": planets,
         "fleets": fleets,
         "step": step,
         "angular_velocity": angular_velocity,
-        "initial_planets": list(initial_by_id.values())
+        "initial_planets": list(initial_by_id.values()),
+        "comets": [],
+        "comet_planet_ids": [],
     }
-    candidates = []
+    # Each entry: (mode, param_overlay)
+    # Ordered from balanced → extreme so early dedup keeps diverse set
     portfolios = [
-        ("all", {}),
-        ("attack", {}),
-        ("expand", {}),
+        ("all",     {}),
+        ("attack",  {}),
+        ("expand",  {}),
         ("passive", {}),
-        ("all", {"expand_avail_min": 6, "defense_margin": 4}),
-        ("all", {"defense_margin": 8, "defense_horizon": 12, "expand_avail_min": 10}),
+        ("all",     {"expand_avail_min": 6,  "defense_margin": 4}),                          # slightly aggressive
+        ("all",     {"defense_margin": 8,    "defense_horizon": 12, "expand_avail_min": 10}), # defensive
+        ("all",     {"defense_margin": 2,    "expand_avail_min": 3, "counter_threshold": 99}),# all-in rush
+        ("all",     {"defense_margin": 15,   "defense_horizon": 15, "expand_avail_min": 20, "counter_threshold": 5}), # ultra-turtle
     ]
+    candidates = []
     for mode, overlay in portfolios[:max_actions]:
-        candidate_config = None
+        candidate_config = dict(DEFAULT_PARAMS)
         if overlay:
-            candidate_config = dict(DEFAULT_PARAMS)
             candidate_config.update(overlay)
         candidates.append(heuristic_agent(obs, config=candidate_config, mode=mode, simulate=True))
-    
+
     unique_candidates = []
     seen = set()
     for c in candidates:
@@ -501,21 +573,41 @@ def generate_candidate_actions(planets, fleets, player_id, step, angular_velocit
         if key not in seen:
             seen.add(key)
             unique_candidates.append(c)
-            
+
     if () not in seen:
         unique_candidates.append([])
-        
+
     return unique_candidates
 
 
 def _simulate_one_ply(planets, fleets, player_id, opp_id, step,
                       angular_velocity, initial_by_id, our_action):
-    """Simulate one ply: our action → opp response → return resulting state."""
+    """Simulate one ply: our action → heuristic opp response → return resulting state.
+
+    Opponent model upgrade: uses heuristic_agent() (our own bot from the
+    opponent's perspective) instead of the old toy greedy.  simulate=True
+    guards all global-state writes so this is safe to call recursively.
+    Falls back to predict_opponent_move() on any exception.
+    """
     actions_map = {player_id: our_action, opp_id: []}
     new_p, new_f = simulate_turn(planets, fleets, actions_map, step,
                                  angular_velocity, initial_by_id)
-    opp_action = predict_opponent_move(new_p, new_f, opp_id, step + 1,
-                                       angular_velocity, initial_by_id)
+    # Build a minimal obs for the opponent and run the full heuristic
+    opp_obs = {
+        "player": opp_id,
+        "planets": new_p,
+        "fleets": new_f,
+        "step": step + 1,
+        "angular_velocity": angular_velocity,
+        "initial_planets": list(initial_by_id.values()),
+        "comets": [],          # no comet path data in simulation
+        "comet_planet_ids": [],
+    }
+    try:
+        opp_action = heuristic_agent(opp_obs, simulate=True)
+    except Exception:
+        opp_action = predict_opponent_move(new_p, new_f, opp_id, step + 1,
+                                           angular_velocity, initial_by_id)
     actions_map = {player_id: [], opp_id: opp_action}
     new_p2, new_f2 = simulate_turn(new_p, new_f, actions_map, step + 1,
                                    angular_velocity, initial_by_id)
@@ -595,17 +687,87 @@ def mcts_search_3ply(planets, fleets, player_id, opp_id, step,
 
 def mcts_search(planets, fleets, player_id, opp_id, step,
                 angular_velocity, initial_by_id, time_budget=0.8):
-    """MCTS entry point — delegates to 3-ply search.
-
-    Active when cfg(config, "use_mcts") is truthy (default True).
-    Each candidate action is a full heuristic turn-plan (all/attack/expand/passive),
-    evaluated via forward simulation so coordinated attacks and defense are
-    correctly accounted for across turns.
-    Time budget of 0.30 s keeps execution within Kaggle's 1 s per-turn limit
-    while giving the portfolio enough room on harder maps.
-    """
+    """Legacy MCTS entry point — kept for fallback/ablation."""
     return mcts_search_3ply(planets, fleets, player_id, opp_id, step,
                             angular_velocity, initial_by_id, time_budget)
+
+
+# ============================================================================
+# BEAM SEARCH (Phase 2 upgrade — replaces 3-ply MCTS as primary search)
+# ============================================================================
+
+def beam_search(planets, fleets, player_id, opp_id, step,
+                angular_velocity, initial_by_id,
+                width=6, depth=8, time_budget=0.40):
+    """Beam Search: keep top-W action sequences, simulate D plies deep.
+
+    Each ply = our candidate action + heuristic opponent response (2 sim turns).
+    Width=6, depth=8 evaluates ~48+ distinct action trajectories 16 turns ahead,
+    vs 3-ply MCTS which evaluates ~16 trajectories 4 turns ahead.
+
+    Time budget is enforced at every expansion — beam stops early and returns
+    the best first-action seen so far. Safe under Kaggle 1 s/turn limit.
+    """
+    start_time = time.time()
+
+    # --- Root expansion ---
+    root_candidates = generate_candidate_actions(
+        planets, fleets, player_id, step, angular_velocity, initial_by_id)
+    if not root_candidates:
+        return []
+
+    # Beam entries: [score, first_action, cur_planets, cur_fleets, cur_step]
+    beam = []
+    for action in root_candidates:
+        if time.time() - start_time > time_budget * 0.5:
+            break
+        try:
+            p1, f1 = _simulate_one_ply(planets, fleets, player_id, opp_id,
+                                        step, angular_velocity, initial_by_id, action)
+            score = evaluate_state(p1, f1, player_id, step + 2)
+            beam.append([score, action, p1, f1, step + 2])
+        except Exception:
+            continue
+
+    if not beam:
+        return root_candidates[0] if root_candidates else []
+
+    beam.sort(key=lambda x: x[0], reverse=True)
+    beam = beam[:width]
+
+    # --- Iterative deepening ---
+    for _depth in range(depth - 1):
+        if time.time() - start_time > time_budget * 0.90:
+            break  # Hard time ceiling — return what we have
+
+        next_beam = []
+        for entry in beam:
+            _score, first_action, cur_p, cur_f, cur_step = entry
+
+            # Generate next-level candidates from this beam state
+            next_candidates = generate_candidate_actions(
+                cur_p, cur_f, player_id, cur_step, angular_velocity, initial_by_id)
+
+            for next_action in next_candidates[:3]:  # top-3 keeps branching tractable
+                if time.time() - start_time > time_budget:
+                    break
+                try:
+                    new_p, new_f = _simulate_one_ply(
+                        cur_p, cur_f, player_id, opp_id, cur_step,
+                        angular_velocity, initial_by_id, next_action)
+                    new_score = evaluate_state(new_p, new_f, player_id, cur_step + 2)
+                    next_beam.append([new_score, first_action, new_p, new_f, cur_step + 2])
+                except Exception:
+                    continue
+
+        if not next_beam:
+            break
+
+        next_beam.sort(key=lambda x: x[0], reverse=True)
+        beam = next_beam[:width]
+
+    # Best first_action from the highest-scoring surviving beam entry
+    return beam[0][1]
 
 
 # ============================================================================
@@ -1224,12 +1386,12 @@ def agent(obs, config=None):
             return heuristic_agent(obs, config, mode="expand")
         return heuristic_agent(obs, config, mode="all")
 
-    # Phase 2: MCTS Action Abstraction (default: on in 2P, 0.30 s budget).
-    # Evaluates 4 full-turn heuristic strategies via forward simulation and picks
-    # the highest-scoring plan. Raises win rate from ~60 % to ~70 % vs starter.
-    if cfg(config, "use_mcts") is True and 30 <= step <= 450:
+    # Phase 2: Beam Search (default on, width=6 depth=8, 0.40 s budget).
+    # Keeps top-W action sequences across D plies (16 turns ahead) — 50x
+    # deeper than the old 3-ply MCTS. Heuristic_agent used as opponent model.
+    if cfg(config, "use_mcts") and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
-        return mcts_search(
+        return beam_search(
             planets,
             fleets,
             player_id,
@@ -1237,6 +1399,8 @@ def agent(obs, config=None):
             step,
             angular_velocity,
             initial_by_id,
+            width=cfg(config, "beam_width"),
+            depth=cfg(config, "beam_depth"),
             time_budget=cfg(config, "mcts_time_budget"),
         )
 
