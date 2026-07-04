@@ -26,16 +26,19 @@ Goal: push ORACLE toward leaderboard strength while keeping the submitted agent 
 
 ### 5. Evaluation and Tuning
 - Added `eval_oracle.py` for fixed-seed evaluation against built-ins and a baseline file.
+- Added `arena_oracle.py` for local Elo-style 2P/4P pool evaluation.
 - Replaced the tuning scaffold with deterministic random search over exposed heuristic parameters.
 - Added `reset_state()` so repeated local games do not leak cross-game memory.
 
 ### 6. Runtime Safety
 - MCTS is gated behind an explicit `config["use_mcts"] is True` check.
-- MCTS has a configurable `mcts_time_budget` and defaults to a bounded 0.15 second budget.
+- MCTS has a configurable `mcts_time_budget` and defaults to a bounded 0.30 second budget.
 - Added a per-turn intercept cache so repeated source-target checks reuse orbital projection and sun-path results.
 
 ### 7. FFA and Comet Upgrades
 - Added 4-player sandbagging: when ORACLE's ship share exceeds the configured threshold, it switches to passive defensive mode instead of advertising itself as the leader.
+- Added 4-player survival mode: when ORACLE's ship share is low, it avoids discretionary attacks and prioritizes defense/expansion.
+- Added 4-player leader-hunt bias when a runaway opponent exceeds the configured share threshold.
 - Added active comet interception using the legal `comets.paths` observation data.
 - Added pre-spawn comet reserve behavior so planets are less likely to drain surplus ships immediately before comet windows.
 - Made `tune_oracle.py` flush progress output for long parameter sweeps.

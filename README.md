@@ -16,7 +16,7 @@ Key behavior:
 - Per-turn intercept caching to reduce repeated orbital geometry work.
 - 4-player sandbagging to avoid becoming the obvious early leader in FFA games.
 - Active comet interception using legal `comets.paths` observations, plus pre-spawn reserve behavior.
-- Bounded MCTS is enabled by default with a `0.15s` per-call budget; set `use_mcts=False` to force pure heuristic mode.
+- Bounded MCTS is enabled by default with a `0.30s` per-call budget; set `use_mcts=False` to force pure heuristic mode.
 
 ## Fixed-Seed Results
 
@@ -43,6 +43,7 @@ These are local fixed-seed measurements, not a guarantee of live leaderboard ELO
 ```text
 oracle-orbit-wars/
   main.py          # Kaggle submission agent
+  arena_oracle.py  # Local Elo-style 2P/4P arena
   eval_oracle.py   # Fixed-seed evaluator
   tune_oracle.py   # Simple deterministic parameter tuner
   test_agent.py    # Quick smoke test
@@ -65,8 +66,9 @@ venv/bin/pip install -r requirements.txt
 ## Validate
 
 ```bash
-venv/bin/python -m py_compile main.py eval_oracle.py tune_oracle.py test_agent.py
+venv/bin/python -m py_compile main.py arena_oracle.py eval_oracle.py tune_oracle.py test_agent.py
 venv/bin/python eval_oracle.py --agent main.py --games 40
+venv/bin/python arena_oracle.py --agents main.py starter starter starter --players 4 --games 40 --shuffle
 ```
 
 If you keep an older baseline copy available, compare against it:

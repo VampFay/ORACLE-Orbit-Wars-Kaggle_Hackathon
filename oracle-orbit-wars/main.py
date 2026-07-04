@@ -38,8 +38,10 @@ DEFAULT_PARAMS = {
     "defense_wait_slack": 2,     # turns of arrival slack before skipping a donor
     "expand_avail_min": 8,       # minimum surplus ships needed to expand
     "ffa_sandbag_share": 0.35,    # in 4P, stop expansion/attacks when leading too hard
+    "ffa_survival_share": 0.24,    # in 4P, avoid attacks when near elimination
+    "ffa_leader_share": 0.36,      # in 4P, bias attacks toward runaway leaders
     "max_moves": 8,              # cap on moves generated per turn
-    "mcts_time_budget": 0.15,    # seconds budget per MCTS call (safe under Kaggle 1 s limit)
+    "mcts_time_budget": 0.30,    # seconds budget per MCTS call (safe under Kaggle 1 s limit)
     "comet_reserve_window": 5,    # turns before spawn to avoid draining surplus ships
     "comet_min_remaining": 4,     # minimum visible comet turns after arrival
     # NOTE: use_mcts=True is the default submission config and gives 70 % vs starter.
@@ -270,6 +272,14 @@ def should_sandbag_ffa(planets, fleets, player_id, threshold):
     return totals.get(player_id, 0) / total_ships > threshold
 
 
+def player_ship_share(planets, fleets, player_id):
+    totals = player_ship_totals(planets, fleets)
+    total_ships = sum(totals.values())
+    if total_ships <= 0:
+        return 0.0
+    return totals.get(player_id, 0) / total_ships
+
+
 # ============================================================================
 # FORWARD SIMULATOR (with CORRECT swept-pair physics)
 # ============================================================================
@@ -469,10 +479,20 @@ def generate_candidate_actions(planets, fleets, player_id, step, angular_velocit
         "initial_planets": list(initial_by_id.values())
     }
     candidates = []
-    candidates.append(heuristic_agent(obs, mode="all", simulate=True))
-    candidates.append(heuristic_agent(obs, mode="attack", simulate=True))
-    candidates.append(heuristic_agent(obs, mode="expand", simulate=True))
-    candidates.append(heuristic_agent(obs, mode="passive", simulate=True))
+    portfolios = [
+        ("all", {}),
+        ("attack", {}),
+        ("expand", {}),
+        ("passive", {}),
+        ("all", {"expand_avail_min": 6, "defense_margin": 4}),
+        ("all", {"defense_margin": 8, "defense_horizon": 12, "expand_avail_min": 10}),
+    ]
+    for mode, overlay in portfolios[:max_actions]:
+        candidate_config = None
+        if overlay:
+            candidate_config = dict(DEFAULT_PARAMS)
+            candidate_config.update(overlay)
+        candidates.append(heuristic_agent(obs, config=candidate_config, mode=mode, simulate=True))
     
     unique_candidates = []
     seen = set()
@@ -581,7 +601,8 @@ def mcts_search(planets, fleets, player_id, opp_id, step,
     Each candidate action is a full heuristic turn-plan (all/attack/expand/passive),
     evaluated via forward simulation so coordinated attacks and defense are
     correctly accounted for across turns.
-    Time budget of 0.15 s keeps execution well within Kaggle's 1 s per-turn limit.
+    Time budget of 0.30 s keeps execution within Kaggle's 1 s per-turn limit
+    while giving the portfolio enough room on harder maps.
     """
     return mcts_search_3ply(planets, fleets, player_id, opp_id, step,
                             angular_velocity, initial_by_id, time_budget)
@@ -912,15 +933,20 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
     # --- PHASE 4: ATTACK (enemy planets) ---
     candidates = []
     enemy_planets_list = [p for p in planets if p[1] not in (-1, player_id)]
-    ship_totals = player_ship_totals(planets, fleets) if is_ffa(planets, fleets) else {}
+    ffa_position = is_ffa(planets, fleets)
+    ship_totals = player_ship_totals(planets, fleets) if ffa_position else {}
     enemy_totals = {pid: ships for pid, ships in ship_totals.items() if pid != player_id}
     weakest_enemy = min(enemy_totals, key=enemy_totals.get) if enemy_totals else None
     leader = max(ship_totals, key=ship_totals.get) if ship_totals else None
+    total_ffa_ships = sum(ship_totals.values())
+    leader_share = ship_totals.get(leader, 0) / total_ffa_ships if total_ffa_ships > 0 else 0.0
     if not sandbagging and mode in ("all", "attack"):
         for mp in my_planets:
             if mp[0] in launched_from:
                 continue
             reserve = 2 if step < 30 else max(3, mp[6] * 2)
+            if ffa_position:
+                reserve += 2
             avail = mp[5] - committed[mp[0]] - reserve
             if avail < 10:
                 continue
@@ -940,11 +966,11 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 v *= 1.7 + t[6] * 0.3
                 if t[5] < 15:
                     v *= 2.3
-                if is_ffa(planets, fleets):
-                    if t[1] == weakest_enemy:
-                        v *= 1.25
-                    elif t[1] == leader and leader != player_id:
-                        v *= 1.15
+                if ffa_position:
+                    if leader != player_id and t[1] == leader and leader_share >= cfg(config, "ffa_leader_share"):
+                        v *= 1.55
+                    elif t[1] == weakest_enemy:
+                        v *= 1.12
                 cost = send + arrival * 1.0
                 v /= (cost + 1.0)
                 candidates.append((v, mp, t, send, angle, arrival))
@@ -974,6 +1000,8 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                     continue
                 # Recalculate avail since we might have committed ships in phase 2
                 reserve = 2 if step < 30 else max(3, mp[6] * 2)
+                if ffa_position:
+                    reserve += 2
                 avail = mp[5] - committed[mp[0]] - reserve
                 if avail < 5:
                     continue
@@ -1017,6 +1045,8 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 if mp[0] in launched_from or t[0] in used_targets:
                     continue
                 reserve = 2 if step < 30 else max(3, mp[6] * 2)
+                if ffa_position:
+                    reserve += 2
                 avail = mp[5] - committed[mp[0]] - reserve
                 need = t[5] + 3
                 if avail < need:
@@ -1190,12 +1220,14 @@ def agent(obs, config=None):
         return heuristic_agent(obs, config, mode="passive")
 
     if ffa_game:
+        if player_ship_share(planets, fleets, player_id) < cfg(config, "ffa_survival_share"):
+            return heuristic_agent(obs, config, mode="expand")
         return heuristic_agent(obs, config, mode="all")
 
-    # Phase 2: MCTS Action Abstraction (default: on in 2P, 0.15 s budget).
+    # Phase 2: MCTS Action Abstraction (default: on in 2P, 0.30 s budget).
     # Evaluates 4 full-turn heuristic strategies via forward simulation and picks
     # the highest-scoring plan. Raises win rate from ~60 % to ~70 % vs starter.
-    if cfg(config, "use_mcts") and 30 <= step <= 450:
+    if cfg(config, "use_mcts") is True and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
         return mcts_search(
             planets,

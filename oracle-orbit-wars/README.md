@@ -35,7 +35,7 @@ flowchart TB
     H --> E[Expansion and race denial]
     H --> G[Grouped attacks]
     H --> L[Endgame sweep]
-    X -->|0.15s default budget| M[3-ply simulator]
+    X -->|0.30s default budget| M[3-ply simulator]
 
     C --> V
     D --> V
@@ -98,6 +98,7 @@ These are local measurements and should not be treated as guaranteed leaderboard
 
 ```text
 main.py          # Kaggle submission agent
+arena_oracle.py  # Local Elo-style 2P/4P arena
 eval_oracle.py   # Fixed-seed evaluator
 tune_oracle.py   # Deterministic random parameter tuner
 test_agent.py    # Quick smoke test against built-in bots
@@ -117,6 +118,7 @@ python test_agent.py
 
 ```bash
 python eval_oracle.py --agent main.py --games 40
+python arena_oracle.py --agents main.py starter starter starter --players 4 --games 40 --shuffle
 python tune_oracle.py --iterations 30 --games 30
 ```
 
