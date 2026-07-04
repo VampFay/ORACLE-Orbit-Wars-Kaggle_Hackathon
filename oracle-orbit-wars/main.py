@@ -142,44 +142,48 @@ def intercept(launch_x, launch_y, target, gs_step, angular_velocity, initial_by_
     return None
 
 
+# Module-level caches for cross-eval optimization (cleared per game/turn)
+_position_cache = {}
+_sun_cache = {}
+_turn_intercept_cache = {}
+
+
 def make_intercept_cache(gs_step, angular_velocity, initial_by_id, comet_lookup=None):
-    """Return a per-turn cached intercept function for repeated source-target checks."""
+    """Return a cached intercept function leveraging module-level caches for speed."""
     comet_lookup = comet_lookup or {}
-    pos_cache = {}
-    sun_cache = {}
-    intercept_cache = {}
 
     def future_position(target, future_step):
+        # Comets are step-dependent and paths are turn-specific, do not cache globally
+        comet = comet_lookup.get(target[0])
+        if comet is not None:
+            path, path_index = comet
+            future_index = path_index + max(1, future_step - gs_step)
+            if future_index >= len(path):
+                return None
+            return (path[future_index][0], path[future_index][1])
+
+        # Standard planets are fully deterministic within a game
         key = (target[0], future_step)
-        if key not in pos_cache:
-            comet = comet_lookup.get(target[0])
-            if comet is not None:
-                path, path_index = comet
-                future_index = path_index + max(1, future_step - gs_step)
-                if future_index >= len(path):
-                    pos_cache[key] = None
-                else:
-                    pos_cache[key] = (path[future_index][0], path[future_index][1])
-            else:
-                pos_cache[key] = planet_position_at(target, future_step, angular_velocity, initial_by_id)
-        return pos_cache[key]
+        if key not in _position_cache:
+            _position_cache[key] = planet_position_at(target, future_step, angular_velocity, initial_by_id)
+        return _position_cache[key]
 
     def cached_path_crosses_sun(x1, y1, x2, y2):
-        key = (round(x1, 3), round(y1, 3), round(x2, 3), round(y2, 3))
-        if key not in sun_cache:
-            sun_cache[key] = path_crosses_sun(x1, y1, x2, y2)
-        return sun_cache[key]
+        key = (round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2))
+        if key not in _sun_cache:
+            _sun_cache[key] = path_crosses_sun(x1, y1, x2, y2)
+        return _sun_cache[key]
 
     def cached_intercept(launch_x, launch_y, target, ships):
         key = (
-            round(launch_x, 3),
-            round(launch_y, 3),
+            round(launch_x, 2),
+            round(launch_y, 2),
             target[0],
             int(ships),
             gs_step,
         )
-        if key in intercept_cache:
-            return intercept_cache[key]
+        if key in _turn_intercept_cache:
+            return _turn_intercept_cache[key]
 
         speed = fleet_speed(ships)
         for t in range(1, 100):
@@ -194,10 +198,10 @@ def make_intercept_cache(gs_step, angular_velocity, initial_by_id, comet_lookup=
                     angle = math.atan2(ty - launch_y, tx - launch_x)
                     arrival = max(1, math.ceil(d / speed))
                     result = (arrival, angle, d)
-                    intercept_cache[key] = result
+                    _turn_intercept_cache[key] = result
                     return result
 
-        intercept_cache[key] = None
+        _turn_intercept_cache[key] = None
         return None
 
     return cached_intercept
@@ -205,11 +209,14 @@ def make_intercept_cache(gs_step, angular_velocity, initial_by_id, comet_lookup=
 
 def incoming_threats(fleets, planet, player_id, horizon=10):
     threats = []
+    max_d = horizon * 6.0
     for f in fleets:
         if f[1] in (player_id, -1):
             continue
         dx = planet[2] - f[2]
         dy = planet[3] - f[3]
+        if abs(dx) > max_d or abs(dy) > max_d:
+            continue
         d = math.hypot(dx, dy)
         if d < 1e-6:
             threats.append((0.0, f[6], f))
@@ -356,6 +363,11 @@ def simulate_turn(planets, fleets, actions_by_player, step, angular_velocity, in
             if path is None:
                 continue
             p_old, p_new = path
+            dx = old_pos[0] - p_old[0]
+            dy = old_pos[1] - p_old[1]
+            max_d = speed + 3.0 + p[4]
+            if dx * dx + dy * dy > max_d * max_d:
+                continue
             if swept_pair_hit(old_pos, new_pos, p_old, p_new, p[4]):
                 combat_lists[p[0]].append(f)
                 fleets_to_remove.add(id(f))
@@ -742,6 +754,8 @@ def beam_search(planets, fleets, player_id, opp_id, step,
 
         next_beam = []
         for entry in beam:
+            if time.time() - start_time > time_budget * 0.90:
+                break
             _score, first_action, cur_p, cur_f, cur_step = entry
 
             # Generate next-level candidates from this beam state
@@ -864,9 +878,12 @@ _enemy_avg_launch = {}
 
 def reset_state():
     """Reset cross-turn memory before a new local evaluation game."""
-    global _prev_enemy_fleets, _enemy_avg_launch
+    global _prev_enemy_fleets, _enemy_avg_launch, _position_cache, _sun_cache, _turn_intercept_cache
     _prev_enemy_fleets = {}
     _enemy_avg_launch = {}
+    _position_cache = {}
+    _sun_cache = {}
+    _turn_intercept_cache = {}
 
 
 def heuristic_agent(obs, config=None, mode="all", simulate=False):
@@ -1356,6 +1373,9 @@ def _sanitize(moves, planets, player_id):
 
 def agent(obs, config=None):
     """ORACLE — opening book, bounded MCTS, and fast heuristic policy."""
+    global _turn_intercept_cache
+    _turn_intercept_cache = {}
+
     if not isinstance(obs, dict):
         obs = vars(obs)
 
