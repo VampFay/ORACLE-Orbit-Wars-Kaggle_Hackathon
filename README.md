@@ -1,6 +1,6 @@
 # ORACLE Orbit Wars Agent
 
-ORACLE is a compact Python agent for Kaggle's Orbit Wars competition. The current submission path favors a fast deterministic heuristic policy over expensive search, because local testing showed the search-heavy version was not safe under turn-budget constraints.
+ORACLE is a compact Python agent for Kaggle's Orbit Wars competition. The current submission path uses a bounded MCTS wrapper over full-turn heuristic plans in 2-player positions, while 4-player games use an FFA-aware heuristic with defensive sandbagging when ORACLE is leading too hard.
 
 ## Current Status
 
@@ -14,7 +14,9 @@ Key behavior:
 - Safer grouped attacks with greedy fallback when synchronized launches are not useful.
 - Endgame sweep logic to convert banked ships into captures before the episode ends.
 - Per-turn intercept caching to reduce repeated orbital geometry work.
-- Optional MCTS code is retained for experiments, but `use_mcts` defaults to `False`.
+- 4-player sandbagging to avoid becoming the obvious early leader in FFA games.
+- Active comet interception using legal `comets.paths` observations, plus pre-spawn reserve behavior.
+- Bounded MCTS is enabled by default with a `0.15s` per-call budget; set `use_mcts=False` to force pure heuristic mode.
 
 ## Fixed-Seed Results
 

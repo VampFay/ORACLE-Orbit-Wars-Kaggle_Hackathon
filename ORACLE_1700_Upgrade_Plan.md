@@ -4,10 +4,10 @@ Goal: push ORACLE toward leaderboard strength while keeping the submitted agent 
 
 ## Implemented Components
 
-### 1. Fast Default Policy
-- MCTS is no longer enabled by default.
-- Search remains available through `config["use_mcts"]`, but the submitted path uses the faster heuristic.
-- Reason: the previous MCTS upgrade was too slow and could hang local evaluation.
+### 1. Bounded Search Policy
+- MCTS is enabled by default with a small `mcts_time_budget`.
+- Search evaluates full-turn heuristic plans instead of single launches.
+- 4-player games use the FFA-aware heuristic directly, with sandbag mode when ORACLE is already leading too hard.
 
 ### 2. ETA-Aware Defense
 - Added `incoming_threats()` to return incoming fleet ETA and ship count.
@@ -31,8 +31,14 @@ Goal: push ORACLE toward leaderboard strength while keeping the submitted agent 
 
 ### 6. Runtime Safety
 - MCTS is gated behind an explicit `config["use_mcts"] is True` check.
-- MCTS has a configurable `mcts_time_budget` and remains opt-in for local experiments.
+- MCTS has a configurable `mcts_time_budget` and defaults to a bounded 0.15 second budget.
 - Added a per-turn intercept cache so repeated source-target checks reuse orbital projection and sun-path results.
+
+### 7. FFA and Comet Upgrades
+- Added 4-player sandbagging: when ORACLE's ship share exceeds the configured threshold, it switches to passive defensive mode instead of advertising itself as the leader.
+- Added active comet interception using the legal `comets.paths` observation data.
+- Added pre-spawn comet reserve behavior so planets are less likely to drain surplus ships immediately before comet windows.
+- Made `tune_oracle.py` flush progress output for long parameter sweeps.
 
 ## Current Fixed-Seed Result
 
@@ -54,4 +60,4 @@ Result on seeds 0..39:
 1. Add stronger opponent pool from submitted historical versions.
 2. Tune heuristic parameters on 100+ seeds.
 3. Add replay diagnostics for losses.
-4. Test any MCTS/search variant only behind hard per-turn timing guards.
+4. Test any larger MCTS/search variant only behind hard per-turn timing guards.

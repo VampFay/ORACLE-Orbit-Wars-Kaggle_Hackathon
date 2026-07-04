@@ -1,6 +1,6 @@
 # ORACLE - Orbit Wars Agent
 
-ORACLE is a self-contained Kaggle Orbit Wars bot. The default submitted policy is a fast heuristic engine; experimental MCTS code remains in `main.py`, but it is disabled unless `config["use_mcts"]` is explicitly set to `True`.
+ORACLE is a self-contained Kaggle Orbit Wars bot. The default submitted policy uses bounded MCTS over full-turn heuristic plans for 2-player positions, while 4-player games use an FFA-aware heuristic with defensive sandbagging when ORACLE is leading too hard.
 
 ## Strategy
 
@@ -11,6 +11,8 @@ ORACLE is a self-contained Kaggle Orbit Wars bot. The default submitted policy i
 - **Greedy fallback:** preserves easy tactical captures when synchronization is not available.
 - **Endgame sweep:** spends late surplus ships on captures that can land before the final turn.
 - **Per-turn intercept cache:** reuses repeated orbit/intercept calculations inside each decision.
+- **4P sandbagging:** suppresses expansion and attacks when our ship share is too high in free-for-all games.
+- **Comet interception:** targets active visible comets using legal `comets.paths` data and reserves ships near spawn windows.
 
 ## Architecture
 
@@ -21,18 +23,23 @@ flowchart TB
     S --> P[Planet and fleet model]
     S --> O[Opening cache]
     S --> H[Fast heuristic policy]
-    S --> X[Optional search policy]
+    S --> X[Bounded MCTS policy]
+    S --> F[4P sandbag check]
 
     O -->|turns 0-30 when replay exists| V[Move validator]
+    F -->|4P game| H
+    F -->|2P game| X
     H --> C[Counter-punch]
     H --> D[ETA-aware defense]
+    H --> K[Comet interception]
     H --> E[Expansion and race denial]
     H --> G[Grouped attacks]
     H --> L[Endgame sweep]
-    X -->|disabled by default| M[3-ply simulator]
+    X -->|0.15s default budget| M[3-ply simulator]
 
     C --> V
     D --> V
+    K --> V
     E --> V
     G --> V
     L --> V
@@ -40,7 +47,7 @@ flowchart TB
     V --> R[Sanitized Kaggle action list]
 ```
 
-The default submission path is `State parser -> Fast heuristic policy -> Move validator`. Search is kept for experiments only because the heuristic path is faster and more stable under Kaggle's turn budget.
+The default 2-player submission path is `State parser -> Bounded MCTS policy -> Move validator`. In 4-player games, ORACLE uses the FFA-aware heuristic directly; if its ship share is too high, sandbagging suppresses expansion and attacks.
 
 ## Turn Flow
 
@@ -56,8 +63,9 @@ flowchart TD
     F --> G[Send just-in-time reinforcements]
     G --> H{Early game and few planets?}
     H -->|yes| I[Rush best nearby neutral]
-    H -->|no| J[Score enemy targets]
-    I --> J
+    H -->|no| R[Target active comets]
+    I --> R
+    R --> J[Score enemy targets]
     J --> K[Try sufficient grouped attacks]
     K --> L[Use greedy fallback for easy captures]
     L --> M[Expand with race-denial bonus]
@@ -111,6 +119,8 @@ python test_agent.py
 python eval_oracle.py --agent main.py --games 40
 python tune_oracle.py --iterations 30 --games 30
 ```
+
+The tuner forces `use_mcts=False` so the exposed heuristic parameters are what it actually optimizes. Re-test accepted parameter sets with `eval_oracle.py` before changing submission defaults.
 
 ## Opening Book Replays
 

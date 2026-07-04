@@ -6,9 +6,9 @@ Default submission path: fast heuristic policy with ETA-aware defense,
 counter-punching, race denial, grouped attacks, greedy tactical fallback,
 and endgame sweeps.
 
-Experimental MCTS/search code is retained for local testing, but disabled
-by default because fixed-seed checks showed no clear win-rate gain for the
-extra runtime cost.
+Bounded MCTS/search is enabled by default for 2-player positions with a
+small per-call budget. 4-player games use the FFA-aware heuristic path,
+with leader sandbagging switching to passive defensive mode.
 
 Author: ORACLE Team
 """
@@ -37,8 +37,11 @@ DEFAULT_PARAMS = {
     "defense_margin": 5,         # extra ships added on top of raw deficit
     "defense_wait_slack": 2,     # turns of arrival slack before skipping a donor
     "expand_avail_min": 8,       # minimum surplus ships needed to expand
+    "ffa_sandbag_share": 0.35,    # in 4P, stop expansion/attacks when leading too hard
     "max_moves": 8,              # cap on moves generated per turn
     "mcts_time_budget": 0.15,    # seconds budget per MCTS call (safe under Kaggle 1 s limit)
+    "comet_reserve_window": 5,    # turns before spawn to avoid draining surplus ships
+    "comet_min_remaining": 4,     # minimum visible comet turns after arrival
     # NOTE: use_mcts=True is the default submission config and gives 70 % vs starter.
     # Kaggle never passes config, so cfg() falls back to this dict every turn.
     "use_mcts": True,
@@ -134,8 +137,9 @@ def intercept(launch_x, launch_y, target, gs_step, angular_velocity, initial_by_
     return None
 
 
-def make_intercept_cache(gs_step, angular_velocity, initial_by_id):
+def make_intercept_cache(gs_step, angular_velocity, initial_by_id, comet_lookup=None):
     """Return a per-turn cached intercept function for repeated source-target checks."""
+    comet_lookup = comet_lookup or {}
     pos_cache = {}
     sun_cache = {}
     intercept_cache = {}
@@ -143,7 +147,16 @@ def make_intercept_cache(gs_step, angular_velocity, initial_by_id):
     def future_position(target, future_step):
         key = (target[0], future_step)
         if key not in pos_cache:
-            pos_cache[key] = planet_position_at(target, future_step, angular_velocity, initial_by_id)
+            comet = comet_lookup.get(target[0])
+            if comet is not None:
+                path, path_index = comet
+                future_index = path_index + max(1, future_step - gs_step)
+                if future_index >= len(path):
+                    pos_cache[key] = None
+                else:
+                    pos_cache[key] = (path[future_index][0], path[future_index][1])
+            else:
+                pos_cache[key] = planet_position_at(target, future_step, angular_velocity, initial_by_id)
         return pos_cache[key]
 
     def cached_path_crosses_sun(x1, y1, x2, y2):
@@ -166,7 +179,10 @@ def make_intercept_cache(gs_step, angular_velocity, initial_by_id):
         speed = fleet_speed(ships)
         for t in range(1, 100):
             future_step = gs_step + t
-            tx, ty = future_position(target, future_step)
+            future_pos = future_position(target, future_step)
+            if future_pos is None:
+                break
+            tx, ty = future_pos
             d = math.hypot(tx - launch_x, ty - launch_y)
             if d <= speed * t + 1e-6:
                 if not cached_path_crosses_sun(launch_x, launch_y, tx, ty):
@@ -211,6 +227,50 @@ def predicted_threat(planets, fleets, planet, player_id, horizon=10):
     threat = sum(t[1] for t in threats)
     min_eta = threats[0][0] if threats else float("inf")
     return int(threat), min_eta
+
+
+def build_comet_lookup(obs):
+    lookup = {}
+    for group in obs.get("comets", []) or []:
+        planet_ids = group.get("planet_ids", [])
+        paths = group.get("paths", [])
+        path_index = group.get("path_index", 0)
+        for i, pid in enumerate(planet_ids):
+            if i < len(paths):
+                lookup[pid] = (paths[i], path_index)
+    return lookup
+
+
+def player_ship_totals(planets, fleets):
+    totals = defaultdict(int)
+    for p in planets:
+        if p[1] >= 0:
+            totals[p[1]] += p[5]
+    for f in fleets:
+        if f[1] >= 0:
+            totals[f[1]] += f[6]
+    return totals
+
+
+def is_ffa(planets, fleets):
+    players = set()
+    for p in planets:
+        if p[1] >= 0:
+            players.add(p[1])
+    for f in fleets:
+        if f[1] >= 0:
+            players.add(f[1])
+    return len(players) >= 4
+
+
+def should_sandbag_ffa(planets, fleets, player_id, threshold):
+    if not is_ffa(planets, fleets):
+        return False
+    totals = player_ship_totals(planets, fleets)
+    total_ships = sum(totals.values())
+    if total_ships <= 0:
+        return False
+    return totals.get(player_id, 0) / total_ships > threshold
 
 
 # ============================================================================
@@ -642,7 +702,9 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
     angular_velocity = obs.get("angular_velocity", 0.0) or 0.0
     initial_planets = obs.get("initial_planets", []) or []
     initial_by_id = {p[0]: p for p in initial_planets}
-    cached_intercept = make_intercept_cache(step, angular_velocity, initial_by_id)
+    comet_lookup = build_comet_lookup(obs)
+    comet_ids = set(obs.get("comet_planet_ids", []) or [])
+    cached_intercept = make_intercept_cache(step, angular_velocity, initial_by_id, comet_lookup)
 
     my_planets = [p for p in planets if p[1] == player_id]
     if not my_planets:
@@ -652,6 +714,12 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
     committed = defaultdict(int)
     prev_enemy_fleets = _prev_enemy_fleets.setdefault(player_id, {})
     enemy_avg_launch = _enemy_avg_launch.get(player_id, 20.0)
+    sandbagging = should_sandbag_ffa(planets, fleets, player_id, cfg(config, "ffa_sandbag_share"))
+    comet_spawn_steps = (50, 150, 250, 350, 450)
+    reserve_for_comets = any(
+        0 < spawn - step <= cfg(config, "comet_reserve_window")
+        for spawn in comet_spawn_steps
+    )
 
     # --- PHASE 1: COUNTER-PUNCH ---
     new_enemy_fleets = []
@@ -678,7 +746,10 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
         best_mp = None
         best_arrival = 999
         for mp in my_planets:
-            avail = mp[5] - committed[mp[0]] - max(3, mp[6] * 2)
+            reserve = max(3, mp[6] * 2)
+            if reserve_for_comets:
+                reserve += 3
+            avail = mp[5] - committed[mp[0]] - reserve
             if avail < source[5] + 5:
                 continue
             if path_crosses_sun(mp[2], mp[3], source[2], source[3]):
@@ -754,7 +825,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
     # Send ALL available ships to the cheapest nearby neutral.
     # With low starting production, we must capture fast or fall behind.
     used_targets = set()
-    if step < 30 and len(my_planets) < 5:
+    if not sandbagging and step < 30 and len(my_planets) < 5:
         best_target = None
         best_score = -1e9
         best_mp = None
@@ -794,10 +865,61 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
             launched_from.add(best_mp[0])
             used_targets.add(best_target[0])
 
-    # --- PHASE 3: ATTACK (enemy planets) ---
+    # --- PHASE 3: COMET INTERCEPT ---
+    # Future comet paths are hidden until spawn, so this phase targets active
+    # visible comets legally using observation.comets path data.
+    if not sandbagging and comet_ids and len(moves) < cfg(config, "max_moves"):
+        comet_targets = [
+            p for p in planets
+            if p[0] in comet_ids and p[1] != player_id and p[0] in comet_lookup
+        ]
+        comet_candidates = []
+        for mp in my_planets:
+            if mp[0] in launched_from:
+                continue
+            reserve = 2 if step < 30 else max(3, mp[6] * 2)
+            avail = mp[5] - committed[mp[0]] - reserve
+            if avail < 6:
+                continue
+            for t in comet_targets:
+                path, path_index = comet_lookup[t[0]]
+                remaining_path = len(path) - path_index - 1
+                if remaining_path <= cfg(config, "comet_min_remaining"):
+                    continue
+                result = cached_intercept(mp[2], mp[3], t, avail)
+                if result is None:
+                    continue
+                arrival, angle, _ = result
+                if arrival + cfg(config, "comet_min_remaining") > remaining_path:
+                    continue
+                need = t[5] + 2
+                if avail < need:
+                    continue
+                send = min(avail, need + 3)
+                score = (remaining_path - arrival) * 2.0 - t[5] - arrival
+                if t[1] not in (-1, player_id):
+                    score += 8.0
+                comet_candidates.append((score, mp, t, send, angle))
+
+        comet_candidates.sort(key=lambda x: x[0], reverse=True)
+        for score, mp, t, send, angle in comet_candidates:
+            if mp[0] in launched_from or t[0] in used_targets:
+                continue
+            moves.append([mp[0], angle, int(send)])
+            committed[mp[0]] += int(send)
+            launched_from.add(mp[0])
+            used_targets.add(t[0])
+            if len(moves) >= cfg(config, "max_moves"):
+                break
+
+    # --- PHASE 4: ATTACK (enemy planets) ---
     candidates = []
     enemy_planets_list = [p for p in planets if p[1] not in (-1, player_id)]
-    if mode in ("all", "attack"):
+    ship_totals = player_ship_totals(planets, fleets)
+    enemy_totals = {pid: ships for pid, ships in ship_totals.items() if pid != player_id}
+    weakest_enemy = min(enemy_totals, key=enemy_totals.get) if enemy_totals else None
+    leader = max(ship_totals, key=ship_totals.get) if ship_totals else None
+    if not sandbagging and mode in ("all", "attack"):
         for mp in my_planets:
             if mp[0] in launched_from:
                 continue
@@ -821,6 +943,11 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 v *= 1.7 + t[6] * 0.3
                 if t[5] < 15:
                     v *= 2.3
+                if is_ffa(planets, fleets):
+                    if t[1] == weakest_enemy:
+                        v *= 1.25
+                    elif t[1] == leader and leader != player_id:
+                        v *= 1.15
                 cost = send + arrival * 1.0
                 v /= (cost + 1.0)
                 candidates.append((v, mp, t, send, angle, arrival))
@@ -907,13 +1034,15 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
                 if len(moves) >= cfg(config, "max_moves"):
                     break
 
-    # --- PHASE 4: EXPAND (with race denial) ---
-    if mode in ("all", "expand") and len(moves) < 6:
+    # --- PHASE 5: EXPAND (with race denial) ---
+    if not sandbagging and mode in ("all", "expand") and len(moves) < 6:
         candidates = []
         for mp in my_planets:
             if mp[0] in launched_from:
                 continue
             reserve = 2 if step < 30 else max(3, mp[6] * 2)
+            if reserve_for_comets:
+                reserve += 3
             avail = mp[5] - committed[mp[0]] - reserve
             expand_avail_min = cfg(config, "expand_avail_min")
             if avail < expand_avail_min:
@@ -966,7 +1095,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
             if len(moves) >= 8:
                 break
 
-    # --- PHASE 5: ENDGAME SWEEP ---
+    # --- PHASE 6: ENDGAME SWEEP ---
     # Late in the game, banked ships lose value. Convert surplus into captures
     # and pressure while still leaving a small reserve on production planets.
     if mode in ("all", "attack") and step >= 440 and len(moves) < cfg(config, "max_moves"):
@@ -1033,11 +1162,11 @@ def _sanitize(moves, planets, player_id):
 
 
 # ============================================================================
-# MAIN AGENT — Opening Book → Optional MCTS → Heuristic
+# MAIN AGENT — Opening Book → Bounded MCTS → Heuristic
 # ============================================================================
 
 def agent(obs, config=None):
-    """ORACLE — opening book, optional local MCTS, and fast heuristic policy."""
+    """ORACLE — opening book, bounded MCTS, and fast heuristic policy."""
     if not isinstance(obs, dict):
         obs = vars(obs)
 
@@ -1059,10 +1188,17 @@ def agent(obs, config=None):
         if opening:
             return opening
 
-    # Phase 2: MCTS Action Abstraction (default: on, 0.15 s budget).
+    ffa_game = is_ffa(planets, fleets)
+    if ffa_game and should_sandbag_ffa(planets, fleets, player_id, cfg(config, "ffa_sandbag_share")):
+        return heuristic_agent(obs, config, mode="passive")
+
+    if ffa_game:
+        return heuristic_agent(obs, config, mode="all")
+
+    # Phase 2: MCTS Action Abstraction (default: on in 2P, 0.15 s budget).
     # Evaluates 4 full-turn heuristic strategies via forward simulation and picks
     # the highest-scoring plan. Raises win rate from ~60 % to ~70 % vs starter.
-    if cfg(config, "use_mcts") and 30 <= step <= 450:
+    if cfg(config, "use_mcts") is True and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
         return mcts_search(
             planets,

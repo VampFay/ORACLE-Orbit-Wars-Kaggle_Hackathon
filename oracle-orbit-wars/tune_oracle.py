@@ -67,22 +67,23 @@ def main_cli():
         "defense_margin": 5,
         "defense_wait_slack": 2,
         "expand_avail_min": 8,
+        "use_mcts": False,
     }
     best_score, w, l, t = score_params(best, seeds)
-    print(f"baseline {best}: score={best_score}, {w}W/{l}L/{t}T")
+    print(f"baseline {best}: score={best_score}, {w}W/{l}L/{t}T", flush=True)
 
     started = time.perf_counter()
     for i in range(args.iterations):
         candidate = mutate(best, rng)
         score, w, l, t = score_params(candidate, seeds)
-        print(f"iter {i:02d} {candidate}: score={score}, {w}W/{l}L/{t}T")
+        print(f"iter {i:02d} {candidate}: score={score}, {w}W/{l}L/{t}T", flush=True)
         if score > best_score:
             best = candidate
             best_score = score
-            print("  accepted")
+            print("  accepted", flush=True)
 
     elapsed = time.perf_counter() - started
-    print(f"best {best}: score={best_score}, elapsed={elapsed:.1f}s")
+    print(f"best {best}: score={best_score}, elapsed={elapsed:.1f}s", flush=True)
 
 
 if __name__ == "__main__":
