@@ -15,7 +15,6 @@ Author: ORACLE Team
 
 import math
 import os
-import sys
 import time
 import json
 from collections import defaultdict
@@ -39,7 +38,8 @@ DEFAULT_PARAMS = {
     "defense_wait_slack": 2,
     "expand_avail_min": 8,
     "max_moves": 8,
-    "use_mcts": True,
+    "mcts_time_budget": 0.15,
+    "use_mcts": False,
 }
 
 
@@ -1024,11 +1024,11 @@ def _sanitize(moves, planets, player_id):
 
 
 # ============================================================================
-# MAIN AGENT — Opening Book → MCTS → Heuristic
+# MAIN AGENT — Opening Book → Optional MCTS → Heuristic
 # ============================================================================
 
 def agent(obs, config=None):
-    """ORACLE — Opening Book + MCTS (correct physics) + Heuristic."""
+    """ORACLE — opening book, optional local MCTS, and fast heuristic policy."""
     if not isinstance(obs, dict):
         obs = vars(obs)
 
@@ -1054,7 +1054,16 @@ def agent(obs, config=None):
     # heuristic is faster and more reliable under Kaggle turn budgets.
     if cfg(config, "use_mcts") is True and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
-        return mcts_search(planets, fleets, player_id, opp_id, step, angular_velocity, initial_by_id, time_budget=0.15)
+        return mcts_search(
+            planets,
+            fleets,
+            player_id,
+            opp_id,
+            step,
+            angular_velocity,
+            initial_by_id,
+            time_budget=cfg(config, "mcts_time_budget"),
+        )
 
     # Phase 3: Pure heuristic
     return heuristic_agent(obs, config)

@@ -44,10 +44,13 @@ oracle-orbit-wars/
   eval_oracle.py   # Fixed-seed evaluator
   tune_oracle.py   # Simple deterministic parameter tuner
   test_agent.py    # Quick smoke test
+  replays/         # Optional opening-book replay inputs, kept empty by default
   requirements.txt
   README.md
   LICENSE
 ```
+
+The root `LICENSE` is provided so GitHub detects the MIT license. The package-level license is kept for standalone submission folders.
 
 ## Setup
 

@@ -93,6 +93,7 @@ main.py          # Kaggle submission agent
 eval_oracle.py   # Fixed-seed evaluator
 tune_oracle.py   # Deterministic random parameter tuner
 test_agent.py    # Quick smoke test against built-in bots
+replays/         # Optional opening-book replay inputs; JSON replays are ignored by default
 requirements.txt
 LICENSE
 ```
@@ -110,6 +111,10 @@ python test_agent.py
 python eval_oracle.py --agent main.py --games 40
 python tune_oracle.py --iterations 30 --games 30
 ```
+
+## Opening Book Replays
+
+`main.py` can load replay JSON files from `replays/` when available. The directory is tracked with `.gitkeep`, but replay JSON files are ignored by default because they can be large and environment-specific. The agent runs normally without replays.
 
 ## Submit to Kaggle
 

@@ -31,6 +31,7 @@ Goal: push ORACLE toward leaderboard strength while keeping the submitted agent 
 
 ### 6. Runtime Safety
 - MCTS is gated behind an explicit `config["use_mcts"] is True` check.
+- MCTS has a configurable `mcts_time_budget` and remains opt-in for local experiments.
 - Added a per-turn intercept cache so repeated source-target checks reuse orbital projection and sun-path results.
 
 ## Current Fixed-Seed Result
