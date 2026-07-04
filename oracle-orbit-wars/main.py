@@ -253,14 +253,11 @@ def player_ship_totals(planets, fleets):
 
 
 def is_ffa(planets, fleets):
-    players = set()
-    for p in planets:
-        if p[1] >= 0:
-            players.add(p[1])
-    for f in fleets:
-        if f[1] >= 0:
-            players.add(f[1])
-    return len(players) >= 4
+    """Return True if this is a 4P FFA game (>= 3 players still own planets)."""
+    # Count only players with at least one owned planet — eliminated players
+    # may still have fleets in transit but are no longer a strategic threat.
+    living = {p[1] for p in planets if p[1] >= 0}
+    return len(living) >= 3
 
 
 def should_sandbag_ffa(planets, fleets, player_id, threshold):
@@ -915,7 +912,7 @@ def heuristic_agent(obs, config=None, mode="all", simulate=False):
     # --- PHASE 4: ATTACK (enemy planets) ---
     candidates = []
     enemy_planets_list = [p for p in planets if p[1] not in (-1, player_id)]
-    ship_totals = player_ship_totals(planets, fleets)
+    ship_totals = player_ship_totals(planets, fleets) if is_ffa(planets, fleets) else {}
     enemy_totals = {pid: ships for pid, ships in ship_totals.items() if pid != player_id}
     weakest_enemy = min(enemy_totals, key=enemy_totals.get) if enemy_totals else None
     leader = max(ship_totals, key=ship_totals.get) if ship_totals else None
@@ -1198,7 +1195,7 @@ def agent(obs, config=None):
     # Phase 2: MCTS Action Abstraction (default: on in 2P, 0.15 s budget).
     # Evaluates 4 full-turn heuristic strategies via forward simulation and picks
     # the highest-scoring plan. Raises win rate from ~60 % to ~70 % vs starter.
-    if cfg(config, "use_mcts") is True and 30 <= step <= 450:
+    if cfg(config, "use_mcts") and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
         return mcts_search(
             planets,
