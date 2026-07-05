@@ -33,10 +33,10 @@ MAX_SPEED = 6.0
 
 DEFAULT_PARAMS = {
     "counter_threshold": None,  # None = auto-tune from enemy launch history
-    "defense_horizon": 10,       # turns ahead to scan for incoming threats
+    "defense_horizon": 6,        # turns ahead to scan for incoming threats
     "defense_margin": 5,         # extra ships added on top of raw deficit
     "defense_wait_slack": 2,     # turns of arrival slack before skipping a donor
-    "expand_avail_min": 8,       # minimum surplus ships needed to expand
+    "expand_avail_min": 12,      # minimum surplus ships needed to expand
     "ffa_sandbag_share": 0.35,   # in 4P, stop expansion/attacks when leading too hard
     "ffa_survival_share": 0.24,  # in 4P, avoid attacks when near elimination
     "ffa_leader_share": 0.36,    # in 4P, bias attacks toward runaway leaders
