@@ -162,8 +162,23 @@ def make_intercept_cache(gs_step, angular_velocity, initial_by_id, comet_lookup=
                 return None
             return (path[future_index][0], path[future_index][1])
 
-        # Standard planets are fully deterministic within a game
-        key = (target[0], future_step)
+        # Standard planets are deterministic for a given game geometry. Include
+        # the initial planet pose so repeated local games cannot reuse stale
+        # positions when reset_state() is accidentally skipped.
+        ip = initial_by_id.get(target[0])
+        if ip is None:
+            pose_key = (
+                round(target[2], 3),
+                round(target[3], 3),
+                round(target[4], 3),
+            )
+        else:
+            pose_key = (
+                round(ip[2], 3),
+                round(ip[3], 3),
+                round(ip[4], 3),
+            )
+        key = (target[0], future_step, round(angular_velocity, 8), pose_key)
         if key not in _position_cache:
             _position_cache[key] = planet_position_at(target, future_step, angular_velocity, initial_by_id)
         return _position_cache[key]
@@ -1409,7 +1424,7 @@ def agent(obs, config=None):
     # Phase 2: Beam Search (default on, width=6 depth=8, 0.40 s budget).
     # Keeps top-W action sequences across D plies (16 turns ahead) — 50x
     # deeper than the old 3-ply MCTS. Heuristic_agent used as opponent model.
-    if cfg(config, "use_mcts") and 30 <= step <= 450:
+    if cfg(config, "use_mcts") is True and 30 <= step <= 450:
         opp_id = 1 if player_id == 0 else 0
         return beam_search(
             planets,

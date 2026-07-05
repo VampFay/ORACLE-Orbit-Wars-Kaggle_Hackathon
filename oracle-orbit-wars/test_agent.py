@@ -13,6 +13,7 @@ def main_test():
     # vs starter
     w, l = 0, 0
     for i in range(20):
+        main.reset_state()
         seed = random.randint(0, 999999)
         env = make("orbit_wars", configuration={"seed": seed}, debug=False)
         env.run([lambda o, c=None: main.agent(o, c), "starter"])
@@ -24,6 +25,7 @@ def main_test():
     # vs random
     w, l = 0, 0
     for i in range(10):
+        main.reset_state()
         seed = random.randint(0, 999999)
         env = make("orbit_wars", configuration={"seed": seed}, debug=False)
         env.run([lambda o, c=None: main.agent(o, c), "random"])
