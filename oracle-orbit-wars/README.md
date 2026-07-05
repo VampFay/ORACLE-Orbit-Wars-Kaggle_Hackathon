@@ -130,9 +130,11 @@ The tuner forces `use_mcts=False` so the exposed heuristic parameters are what i
 
 ## Submit to Kaggle
 
-From the repository root:
+The source of truth is `oracle-orbit-wars/main.py`. Submission zip files are not
+committed to the repository; generate one locally only when Kaggle requires a
+packaged upload:
 
 ```bash
-zip -j ORACLE_1700_SUBMISSION.zip oracle-orbit-wars/main.py
-kaggle competitions submit orbit-wars -f ORACLE_1700_SUBMISSION.zip -m "ORACLE optimized heuristic"
+zip -j /tmp/oracle_submission.zip oracle-orbit-wars/main.py
+kaggle competitions submit orbit-wars -f /tmp/oracle_submission.zip -m "ORACLE optimized heuristic"
 ```

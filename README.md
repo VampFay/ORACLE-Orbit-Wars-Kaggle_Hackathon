@@ -79,9 +79,11 @@ venv/bin/python eval_oracle.py --agent main.py --baseline path/to/baseline_main.
 
 ## Submit
 
-From the repo root:
+The source of truth is `oracle-orbit-wars/main.py`. Zip files are intentionally
+not committed because they duplicate source and can go stale. If Kaggle requires
+a packaged upload, generate it locally at submission time:
 
 ```bash
-zip -j ORACLE_SUBMISSION_OPTIMIZED.zip oracle-orbit-wars/main.py
-kaggle competitions submit orbit-wars -f ORACLE_SUBMISSION_OPTIMIZED.zip -m "ORACLE optimized heuristic"
+zip -j /tmp/oracle_submission.zip oracle-orbit-wars/main.py
+kaggle competitions submit orbit-wars -f /tmp/oracle_submission.zip -m "ORACLE optimized heuristic"
 ```
