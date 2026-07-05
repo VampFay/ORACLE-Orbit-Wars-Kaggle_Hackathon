@@ -467,21 +467,12 @@ def evaluate_state(planets, fleets, player_id, step):
 
     my_ships = sum(p[5] for p in my_planets)
     enemy_ships = sum(p[5] for p in enemy_planets)
-    my_planet_ids = {p[0] for p in my_planets}
-    enemy_planet_ids = {p[0] for p in enemy_planets}
-
-    # In-transit ships + fleet threat balance
-    # f[5] = target planet_id, f[6] = ships, f[1] = owner
-    fleet_threat_delta = 0.0
+    # In-transit ships counting
     for f in fleets:
         if f[1] == player_id:
             my_ships += f[6]
-            if f[5] in enemy_planet_ids:  # our fleet attacking enemy
-                fleet_threat_delta += f[6] * 0.25
         elif f[1] >= 0:
             enemy_ships += f[6]
-            if f[5] in my_planet_ids:     # enemy fleet threatening us
-                fleet_threat_delta -= f[6] * 0.25
 
     # Time factor — production lead is worth more with more turns left
     turns_left = max(1, EPISODE_STEPS - step)
@@ -507,8 +498,7 @@ def evaluate_state(planets, fleets, player_id, step):
     else:
         prod_dominance = 0.0
 
-    return (ship_score + prod_score + fleet_threat_delta
-            + planet_score + win_bonus + prod_dominance)
+    return (ship_score + prod_score + planet_score + win_bonus + prod_dominance)
 
 
 # ============================================================================
