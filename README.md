@@ -82,6 +82,6 @@ venv/bin/python eval_oracle.py --agent main.py --baseline path/to/baseline_main.
 From the repo root:
 
 ```bash
-zip -j ORACLE_1700_SUBMISSION.zip oracle-orbit-wars/main.py
-kaggle competitions submit orbit-wars -f ORACLE_1700_SUBMISSION.zip -m "ORACLE optimized heuristic"
+zip -j ORACLE_SUBMISSION_OPTIMIZED.zip oracle-orbit-wars/main.py
+kaggle competitions submit orbit-wars -f ORACLE_SUBMISSION_OPTIMIZED.zip -m "ORACLE optimized heuristic"
 ```
